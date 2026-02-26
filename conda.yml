@@ -1,4 +1,4 @@
-name: da
+name: depthextract
 channels:
   - conda-forge
   - defaults
