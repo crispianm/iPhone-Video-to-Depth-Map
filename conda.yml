@@ -1,0 +1,14 @@
+name: da
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - numpy
+  - pip
+  - pip:
+    - pyobjc-core
+    - pyobjc-framework-AVFoundation
+    - pyobjc-framework-Quartz
+    - pyobjc-framework-CoreMedia
+    - pyobjc
