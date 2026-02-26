@@ -2,3 +2,4 @@
 *.mov
 *.aae
 *.npz
+.vscode/settings.json
