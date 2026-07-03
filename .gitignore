@@ -3,3 +3,6 @@
 *.aae
 *.npz
 .vscode/settings.json
+__pycache__/
+*.pyc
+.DS_Store

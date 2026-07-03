@@ -1,6 +1,5 @@
 numpy>=1.25
-pyobjc-core>=9.0
+pyobjc-framework-Cocoa>=9.0
 pyobjc-framework-AVFoundation>=9.0
-pyobjc-framework-Quartz>=9.0
 pyobjc-framework-CoreMedia>=9.0
-pyobjc>=9.0
+pyobjc-framework-Quartz>=9.0

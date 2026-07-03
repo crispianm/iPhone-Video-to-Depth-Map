@@ -3,7 +3,7 @@
 This script uses PyObjC / AVFoundation on macOS to request the
 `kCVPixelFormatType_DisparityFloat16` pixel format and saves the
 resulting `(frames, height, width)` float16 tensor to a compressed
-NumPy `.npz` file. Designed for researchers who need the calibrated
+NumPy `.npz` file. Designed for researchers who need the native float16
 disparity buffers rather than visualized video frames.
 
 Usage (CLI):
@@ -11,13 +11,11 @@ Usage (CLI):
 
 Notes:
  - macOS only (requires AVFoundation).
- - Recommended to run inside the provided `conda` env or install the
-   packages from `requirements.txt`.
+ - Install dependencies from `requirements.txt` (see README).
 """
 
 from pathlib import Path
 import argparse
-import os
 import sys
 
 import numpy as np
@@ -25,6 +23,49 @@ import Foundation
 import AVFoundation
 import CoreMedia
 from Quartz import CoreVideo
+
+
+# Public CMFormatDescription video codec fourCCs for Apple's depth/disparity
+# auxiliary tracks — used only to give the saved `depth_codec` a human-readable
+# name; Apple exposes no documented per-track flag for these.
+_CODEC_DISPARITY_HEVC = 1684632424  # 'dish'
+_CODEC_DEPTH_HEVC = 1685091432      # 'dpth'
+
+
+def _read_track_metadata(asset, depth_track, verbose: bool = False):
+    """Read provenance metadata — the capturing device model and the depth
+    track's codec — for saving alongside the disparity tensor. Returns
+    (codec, device_model) as strings ("unknown" if not determinable).
+    """
+    device_model = "unknown"
+    try:
+        for item in asset.commonMetadata():
+            if item.commonKey() == "model":
+                device_model = str(item.stringValue())
+                break
+    except Exception as exc:
+        if verbose:
+            print(f"Warning: could not read device model metadata: {exc}")
+
+    codec = "unknown"
+    try:
+        descs = depth_track.formatDescriptions()
+        if descs:
+            subtype = CoreMedia.CMFormatDescriptionGetMediaSubType(descs[0])
+            if subtype == _CODEC_DISPARITY_HEVC:
+                codec = "disparity (HEVC)"
+            elif subtype == _CODEC_DEPTH_HEVC:
+                codec = "depth (HEVC)"
+            else:
+                codec = str(subtype)
+    except Exception as exc:
+        if verbose:
+            print(f"Warning: could not read depth track codec: {exc}")
+
+    if verbose:
+        print(f"Device model: {device_model}, depth codec: {codec}")
+
+    return codec, device_model
 
 
 def extract_depth_to_npz(mov_path: str, npz_path: str, max_frames: int = None, verbose: bool = False):
@@ -58,26 +99,20 @@ def extract_depth_to_npz(mov_path: str, npz_path: str, max_frames: int = None, v
                 print(f"Found depth track: {track.trackID()} (Type: auxv)")
             break
 
-        for desc in track.formatDescriptions():
-            subtype = CoreMedia.CMFormatDescriptionGetMediaSubType(desc)
-            # Known subtypes used historically; keep as fallback
-            if subtype in [1684632424, 1684890161]:
-                depth_track = track
-                if verbose:
-                    print(f"Found depth track via subtype: {track.trackID()}")
-                break
-        if depth_track:
-            break
-
     if not depth_track:
         print("Error: No depth track found. Make sure 'All Photos Data' was enabled when sending the video.")
         return False
+
+    depth_codec, device_model = _read_track_metadata(asset, depth_track, verbose=verbose)
 
     # Request native 16-bit float disparity
     kCVPixelFormatType_DisparityFloat16 = 1751411059
     output_settings = {str(CoreVideo.kCVPixelBufferPixelFormatTypeKey): kCVPixelFormatType_DisparityFloat16}
 
-    reader, _ = AVFoundation.AVAssetReader.assetReaderWithAsset_error_(asset, None)
+    reader, reader_err = AVFoundation.AVAssetReader.assetReaderWithAsset_error_(asset, None)
+    if reader is None:
+        print(f"Error: could not create AVAssetReader: {reader_err}")
+        return False
     output = AVFoundation.AVAssetReaderTrackOutput.assetReaderTrackOutputWithTrack_outputSettings_(depth_track, output_settings)
     output.setAlwaysCopiesSampleData_(False)
 
@@ -90,8 +125,6 @@ def extract_depth_to_npz(mov_path: str, npz_path: str, max_frames: int = None, v
 
     depth_frames = []
     frame_times = []
-    last_width = None
-    last_height = None
 
     if verbose:
         print("Extracting frames...")
@@ -123,27 +156,26 @@ def extract_depth_to_npz(mov_path: str, npz_path: str, max_frames: int = None, v
         valid_frame = frame_reshaped[:, :width]
         depth_frames.append(valid_frame.copy())
 
-        # capture presentation timestamp if available
-        try:
-            ts = CoreMedia.CMSampleBufferGetPresentationTimeStamp(sample_buffer)
-            t_sec = CoreMedia.CMTimeGetSeconds(ts)
-            frame_times.append(float(t_sec))
-        except Exception:
-            frame_times.append(float(len(depth_frames) - 1))
-
-        last_width = width
-        last_height = height
+        ts = CoreMedia.CMSampleBufferGetPresentationTimeStamp(sample_buffer)
+        frame_times.append(float(CoreMedia.CMTimeGetSeconds(ts)))
 
         CoreVideo.CVPixelBufferUnlockBaseAddress(pixel_buffer, CoreVideo.kCVPixelBufferLock_ReadOnly)
 
         if max_frames is not None and len(depth_frames) >= max_frames:
+            reader.cancelReading()
             break
 
     if reader.status() == AVFoundation.AVAssetReaderStatusCompleted or len(depth_frames) > 0:
         depth_tensor = np.stack(depth_frames, axis=0)
         out_dir = Path(npz_path).parent
         out_dir.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(npz_path, depth=depth_tensor, times=np.array(frame_times, dtype=np.float32))
+        np.savez_compressed(
+            npz_path,
+            depth=depth_tensor,
+            times=np.array(frame_times, dtype=np.float32),
+            depth_codec=depth_codec,
+            device_model=device_model,
+        )
         if verbose:
             print(f"Success! Saved {depth_tensor.shape} tensor to {npz_path}")
         return True

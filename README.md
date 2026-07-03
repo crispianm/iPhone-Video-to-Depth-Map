@@ -6,11 +6,25 @@ This small project contains a macOS/AVFoundation-based utility to extract iPhone
 ## Files
 - `extract.py` - main extraction script (uses PyObjC + AVFoundation to request `kCVPixelFormatType_DisparityFloat16` and save a `(frames, height, width)` float16 tensor).
 - `requirements.txt` — pip-installable packages (minimal list).
-- `conda.yml` — conda environment spec (recommended for reproducibility).
 - `README.md` — this file.
 - `LICENSE` — Apache License 2.0.
 
-### Obtaining the original video from an iOS/MacOS Device
+## Capturing a depth video on iPhone
+`extract.py` only works on a video that actually contains a depth/disparity (`auxv`) track. **A normal video recording does _not_ include depth** — you have to record in **Cinematic mode** (or use a third‑party depth‑capture app).
+
+### Cinematic mode (iPhone 13 and later, iOS 15+)
+1. Open the **Camera** app.
+2. Swipe the mode selector across to **Cinematic**.
+3. (Optional) Tap a subject to lock focus; tap the *f*‑number at the top of the screen to change the depth‑of‑field strength.
+4. Tap the shutter to start recording, and tap it again to stop.
+
+Cinematic mode stores a per‑frame disparity map alongside the video as an `auxv` track — exactly what this tool extracts. Capture resolution is 1080p·30 fps on iPhone 13, and up to 4K·30 fps (HDR) on iPhone 14 Pro and later.
+
+> **Calibration note:** on current iPhones the Cinematic disparity is estimated from the camera system and is *relative* — consistent ordering and gradients, but no fixed real‑world scale. Don't treat it as metric depth without independent calibration.
+
+Alternatively, third‑party depth/LiDAR recording apps (e.g. Record3D) can produce a `.MOV` with a compatible depth track.
+
+## Getting the original video onto your Mac
 To preserve the original `.MOV` (including the `auxv` depth track and original metadata), follow these simple options from iPhoneLife:
 
 - From an iPhone (recommended when transferring between Apple devices):
@@ -27,53 +41,68 @@ To preserve the original `.MOV` (including the `auxv` depth track and original m
 
 Using one of these methods ensures you receive the original `.MOV` with its auxiliary depth track intact — which is required for `extract.py` to read native float16 disparity buffers.
 
-## Reproducible setup (recommended)
-### Using conda (preferred on macOS):
+## Setup
+Install the dependencies with [uv](https://docs.astral.sh/uv/) (fast and reproducible):
 
 ```bash
-conda env create -f conda.yml
-conda activate depthextract
-python extract.py
+uv venv                               # create a local .venv
+uv pip install -r requirements.txt    # install dependencies into it
+uv run python extract.py --help       # verify the install
 ```
 
-Notes:
-- This script requires macOS with AVFoundation (it uses PyObjC bindings). It will not work on Linux/Windows.
-- The `depthextract` env name matches the original environment used when developing this script.
+`uv run` executes inside the project's `.venv` automatically — no manual activation needed. If you prefer, run `source .venv/bin/activate` once and then drop the `uv run` prefix.
 
-### Alternative pip-based setup
-If you prefer a venv + pip:
+Note: this script requires macOS with AVFoundation (it uses PyObjC bindings). It will not work on Linux/Windows.
+
+### Alternative: plain venv + pip
+If you don't have uv installed:
 
 ```bash
-python -m venv venv
-source venv/bin/activate
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-python extract.py
+python extract.py --help              # verify the install
 ```
 
 ## Usage
-Place your `.MOV` (example `IMG_5333.MOV`) in the project folder and run `python extract.py`. The script prints progress and writes an `.npz` file (by default `./depths/IMG_5333_depth.npz`).
-
-## Quick visual hack (lossy)
-If you only need a quick visual depth map (not the calibrated float16 disparity tensor), you can remux and decode the `auxv` track using `MP4Box` and `ffmpeg`. This is lossy and intended for inspection only — it does not preserve the original disparity semantics.
-
-Install the tools with Homebrew:
 
 ```bash
-brew install ffmpeg gpac
+python extract.py INPUT.MOV [-o OUTPUT.npz] [--max-frames N] [-v]
 ```
 
-Then run:
+(If you set up with uv and didn't activate the venv, prefix commands with `uv run`, e.g. `uv run python extract.py ...`.)
+
+| Argument | Description |
+| --- | --- |
+| `INPUT.MOV` | Depth video to read (required). |
+| `-o`, `--output` | Output `.npz` path. Defaults to `INPUT_depth.npz` next to the input file. |
+| `--max-frames N` | Stop after `N` frames (handy for a quick test). |
+| `-v`, `--verbose` | Print progress and the detected device model / codec. |
+
+Example:
 
 ```bash
-MP4Box -add self#2:hdlr=vide IMG_5333.MOV -out remux.mp4
-ffmpeg -vcodec hevc -i remux.mp4 -map 0:1 map.mp4
+python extract.py IMG_5333.MOV -v
+# → writes IMG_5333_depth.npz next to the input
 ```
 
-`map.mp4` contains a viewable video track derived from the depth data; it is useful for quick checks but not for analysis that requires true disparity values.
+### Output format
+The `.npz` archive contains:
 
-### What this does (why it matters)
-- AVFoundation decodes the depth/auxv track and can return native float16 disparity buffers (`kCVPixelFormatType_DisparityFloat16`).
-- Extracting via AVFoundation preserves the float16 disparity semantics; remuxing and decoding with `ffmpeg` yields generic video pixels and loses the underlying depth semantics.
+- `depth` — `(frames, height, width)` **float16** disparity tensor.
+- `times` — per‑frame presentation timestamps in seconds (`float32`).
+- `depth_codec`, `device_model` — provenance metadata strings.
+
+Load it back with NumPy:
+
+```python
+import numpy as np
+
+data = np.load("IMG_5333_depth.npz")
+depth = data["depth"]          # (frames, H, W) float16 disparity
+times = data["times"]          # (frames,) seconds
+print(depth.shape, str(data["device_model"]))
+```
 
 ## Sharing and licensing
 This repository is licensed under the Apache License 2.0. See the `LICENSE` file for the full text.
